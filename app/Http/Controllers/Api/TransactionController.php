@@ -45,8 +45,7 @@ class TransactionController extends Controller
 
         $transactions = $query
             ->latest('transaction_date')
-            ->paginate(10)
-            ->withQueryString();
+            ->paginate(10);
 
         return response()->json([
             'success' => true,
