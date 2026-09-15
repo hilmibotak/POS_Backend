@@ -14,14 +14,17 @@ class Product extends Model
     use HasFactory;
 
     protected $fillable = [
-        'category_id',
         'name',
-        'barcode',
+        'brand',
+        'size',
+        'category_id',
         'base_unit_id',
         'purchase_price',
         'selling_price',
         'stock',
-        'minimum_stock',
+        'min_stock',
+        'barcode',
+        'description',
         'is_active',
     ];
 

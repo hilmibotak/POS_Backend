@@ -4,19 +4,23 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Product;
-use App\Models\Category;
-use App\Models\Unit;
 use Illuminate\Http\Request;
 
 class ProductController extends Controller
 {
+    // ==========================================
+    // GET ALL PRODUCTS
+    // ==========================================
+
     public function index()
     {
         $products = Product::with([
             'category',
             'baseUnit',
             'productUnits.unit'
-        ])->latest()->get();
+        ])
+            ->latest()
+            ->get();
 
         return response()->json([
             'success' => true,
@@ -25,43 +29,116 @@ class ProductController extends Controller
         ]);
     }
 
+    // ==========================================
+    // CREATE PRODUCT
+    // ==========================================
+
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'category_id' => 'required|exists:categories,id',
+            'category_id' => [
+                'required',
+                'exists:categories,id'
+            ],
 
-            'name' => 'required|string|max:255',
+            'name' => [
+                'required',
+                'string',
+                'max:255'
+            ],
 
-            'barcode' => 'nullable|string|max:255|unique:products,barcode',
+            // BARU
+            'brand' => [
+                'nullable',
+                'string',
+                'max:255'
+            ],
 
-            'base_unit_id' => 'required|exists:units,id',
+            // BARU
+            'size' => [
+                'nullable',
+                'string',
+                'max:255'
+            ],
 
-            'purchase_price' => 'nullable|numeric|min:0',
+            'barcode' => [
+                'nullable',
+                'string',
+                'max:255',
+                'unique:products,barcode'
+            ],
 
-            'selling_price' => 'required|numeric|min:0',
+            'base_unit_id' => [
+                'required',
+                'exists:units,id'
+            ],
 
-            'stock' => 'nullable|numeric|min:0',
+            'purchase_price' => [
+                'nullable',
+                'numeric',
+                'min:0'
+            ],
 
-            'minimum_stock' => 'nullable|numeric|min:0',
+            'selling_price' => [
+                'required',
+                'numeric',
+                'min:0'
+            ],
 
-            'is_active' => 'boolean',
+            'stock' => [
+                'nullable',
+                'numeric',
+                'min:0'
+            ],
+
+            'minimum_stock' => [
+                'nullable',
+                'numeric',
+                'min:0'
+            ],
+
+            'is_active' => [
+                'nullable',
+                'boolean'
+            ],
         ]);
 
         $product = Product::create([
             'category_id' => $validated['category_id'],
+
             'name' => $validated['name'],
+
+            // BARU
+            'brand' => $validated['brand'] ?? null,
+
+            // BARU
+            'size' => $validated['size'] ?? null,
+
             'barcode' => $validated['barcode'] ?? null,
+
             'base_unit_id' => $validated['base_unit_id'],
-            'purchase_price' => $validated['purchase_price'] ?? 0,
-            'selling_price' => $validated['selling_price'],
-            'stock' => $validated['stock'] ?? 0,
-            'minimum_stock' => $validated['minimum_stock'] ?? 0,
-            'is_active' => $validated['is_active'] ?? true,
+
+            'purchase_price' =>
+                $validated['purchase_price'] ?? 0,
+
+            'selling_price' =>
+                $validated['selling_price'],
+
+            'stock' =>
+                $validated['stock'] ?? 0,
+
+            'minimum_stock' =>
+                $validated['minimum_stock'] ?? 0,
+
+            'is_active' =>
+                $validated['is_active'] ?? true,
         ]);
 
+        // Load relationship
         $product->load([
             'category',
-            'baseUnit'
+            'baseUnit',
+            'productUnits.unit'
         ]);
 
         return response()->json([
@@ -70,6 +147,10 @@ class ProductController extends Controller
             'data' => $product,
         ], 201);
     }
+
+    // ==========================================
+    // GET DETAIL PRODUCT
+    // ==========================================
 
     public function show(Product $product)
     {
@@ -86,26 +167,80 @@ class ProductController extends Controller
         ]);
     }
 
-    public function update(Request $request, Product $product)
-    {
+    // ==========================================
+    // UPDATE PRODUCT
+    // ==========================================
+
+    public function update(
+        Request $request,
+        Product $product
+    ) {
         $validated = $request->validate([
-            'category_id' => 'required|exists:categories,id',
+            'category_id' => [
+                'required',
+                'exists:categories,id'
+            ],
 
-            'name' => 'required|string|max:255',
+            'name' => [
+                'required',
+                'string',
+                'max:255'
+            ],
 
-            'barcode' => 'nullable|string|max:255|unique:products,barcode,' . $product->id,
+            // BARU
+            'brand' => [
+                'nullable',
+                'string',
+                'max:255'
+            ],
 
-            'base_unit_id' => 'required|exists:units,id',
+            // BARU
+            'size' => [
+                'nullable',
+                'string',
+                'max:255'
+            ],
 
-            'purchase_price' => 'nullable|numeric|min:0',
+            'barcode' => [
+                'nullable',
+                'string',
+                'max:255',
+                'unique:products,barcode,' . $product->id
+            ],
 
-            'selling_price' => 'required|numeric|min:0',
+            'base_unit_id' => [
+                'required',
+                'exists:units,id'
+            ],
 
-            'stock' => 'nullable|numeric|min:0',
+            'purchase_price' => [
+                'nullable',
+                'numeric',
+                'min:0'
+            ],
 
-            'minimum_stock' => 'nullable|numeric|min:0',
+            'selling_price' => [
+                'required',
+                'numeric',
+                'min:0'
+            ],
 
-            'is_active' => 'boolean',
+            'stock' => [
+                'nullable',
+                'numeric',
+                'min:0'
+            ],
+
+            'minimum_stock' => [
+                'nullable',
+                'numeric',
+                'min:0'
+            ],
+
+            'is_active' => [
+                'nullable',
+                'boolean'
+            ],
         ]);
 
         $product->update($validated);
@@ -122,6 +257,10 @@ class ProductController extends Controller
             'data' => $product,
         ]);
     }
+
+    // ==========================================
+    // DEACTIVATE PRODUCT
+    // ==========================================
 
     public function destroy(Product $product)
     {
