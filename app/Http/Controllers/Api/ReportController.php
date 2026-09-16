@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Product;
+use App\Models\StockMovement;
 use App\Models\Transaction;
 use Illuminate\Http\Request;
 
@@ -75,6 +76,12 @@ class ReportController extends Controller
     |--------------------------------------------------------------------------
     | Laporan Stok
     |--------------------------------------------------------------------------
+    |
+    | Laporan ini berisi:
+    | 1. Kondisi stok saat ini
+    | 2. Riwayat barang masuk
+    | 3. Riwayat barang keluar
+    |
     */
 
     public function stock(Request $request)
@@ -84,12 +91,35 @@ class ReportController extends Controller
                 'nullable',
                 'in:all,aman,menipis,habis',
             ],
+
             'search' => [
                 'nullable',
                 'string',
                 'max:255',
             ],
+
+            'movement_start_date' => [
+                'nullable',
+                'date',
+            ],
+
+            'movement_end_date' => [
+                'nullable',
+                'date',
+                'after_or_equal:movement_start_date',
+            ],
+
+            'movement_type' => [
+                'nullable',
+                'in:all,in,out',
+            ],
         ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | DATA STOK SAAT INI
+        |--------------------------------------------------------------------------
+        */
 
         $query = Product::with([
             'category',
@@ -107,7 +137,16 @@ class ReportController extends Controller
 
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
-                    ->orWhere('barcode', 'like', "%{$search}%");
+                    ->orWhere('brand', 'like', "%{$search}%")
+                    ->orWhere('size', 'like', "%{$search}%")
+                    ->orWhere('barcode', 'like', "%{$search}%")
+                    ->orWhereHas('category', function ($categoryQuery) use ($search) {
+                        $categoryQuery->where(
+                            'name',
+                            'like',
+                            "%{$search}%"
+                        );
+                    });
             });
         }
 
@@ -135,7 +174,13 @@ class ReportController extends Controller
 
             return [
                 'id' => $product->id,
+
                 'name' => $product->name,
+
+                'brand' => $product->brand,
+
+                'size' => $product->size,
+
                 'barcode' => $product->barcode,
 
                 'category' => $product->category,
@@ -143,9 +188,11 @@ class ReportController extends Controller
                 'base_unit' => $product->baseUnit,
 
                 'purchase_price' => (float) $product->purchase_price,
+
                 'selling_price' => (float) $product->selling_price,
 
                 'stock' => $stock,
+
                 'minimum_stock' => $minimumStock,
 
                 'stock_status' => $stockStatus,
@@ -162,7 +209,7 @@ class ReportController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Filter Status
+        | Filter Status Stok
         |--------------------------------------------------------------------------
         */
 
@@ -178,7 +225,7 @@ class ReportController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Summary
+        | Summary Stok
         |--------------------------------------------------------------------------
         */
 
@@ -204,19 +251,247 @@ class ReportController extends Controller
                 ->sum('selling_value'),
         ];
 
+        /*
+        |--------------------------------------------------------------------------
+        | RIWAYAT PERGERAKAN STOK
+        |--------------------------------------------------------------------------
+        */
+
+        $movementQuery = StockMovement::with([
+            'product.category',
+            'product.baseUnit',
+            'user',
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Filter Tanggal Movement
+        |--------------------------------------------------------------------------
+        */
+
+        $movementStartDate =
+            $validated['movement_start_date']
+            ?? now()->startOfMonth()->toDateString();
+
+        $movementEndDate =
+            $validated['movement_end_date']
+            ?? now()->toDateString();
+
+        $movementQuery->whereBetween('created_at', [
+            $movementStartDate . ' 00:00:00',
+            $movementEndDate . ' 23:59:59',
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Filter Jenis Movement
+        |--------------------------------------------------------------------------
+        */
+
+        $movementType =
+            $validated['movement_type'] ?? 'all';
+
+        if ($movementType !== 'all') {
+            $movementQuery->where(
+                'type',
+                $movementType
+            );
+        } else {
+            $movementQuery->whereIn('type', [
+                'in',
+                'out',
+            ]);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Search Movement
+        |--------------------------------------------------------------------------
+        */
+
+        if (!empty($validated['search'])) {
+            $search = $validated['search'];
+
+            $movementQuery->where(function ($q) use ($search) {
+                $q->where('note', 'like', "%{$search}%")
+                    ->orWhere('reference_type', 'like', "%{$search}%")
+                    ->orWhereHas('product', function ($productQuery) use ($search) {
+                        $productQuery
+                            ->where('name', 'like', "%{$search}%")
+                            ->orWhere('brand', 'like', "%{$search}%")
+                            ->orWhere('size', 'like', "%{$search}%")
+                            ->orWhere('barcode', 'like', "%{$search}%");
+                    });
+            });
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Ambil Movement
+        |--------------------------------------------------------------------------
+        */
+
+        $movements = $movementQuery
+            ->latest('created_at')
+            ->get();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Format Movement
+        |--------------------------------------------------------------------------
+        */
+
+        $movements = $movements->map(function ($movement) {
+            $product = $movement->product;
+
+            $unit = $product?->baseUnit;
+
+            $quantity = (float) $movement->quantity;
+
+            return [
+                'id' => $movement->id,
+
+                'date' => $movement->created_at,
+
+                'type' => $movement->type,
+
+                'type_label' => match ($movement->type) {
+                    'in' => 'Barang Masuk',
+                    'out' => 'Barang Keluar',
+                    default => ucfirst($movement->type),
+                },
+
+                'quantity' => $quantity,
+
+                'reference_type' => $movement->reference_type,
+
+                'reference_id' => $movement->reference_id,
+
+                'note' => $movement->note,
+
+                'product' => [
+                    'id' => $product?->id,
+
+                    'name' => $product?->name,
+
+                    'brand' => $product?->brand,
+
+                    'size' => $product?->size,
+
+                    'barcode' => $product?->barcode,
+
+                    'category' => $product?->category,
+
+                    'base_unit' => $unit,
+                ],
+
+                'user' => [
+                    'id' => $movement->user?->id,
+
+                    'name' => $movement->user?->name,
+                ],
+            ];
+        });
+
+        /*
+        |--------------------------------------------------------------------------
+        | Summary Movement
+        |--------------------------------------------------------------------------
+        */
+
+        $movementSummary = [
+            'total_movements' => $movements->count(),
+
+            'total_in_movements' => $movements
+                ->where('type', 'in')
+                ->count(),
+
+            'total_out_movements' => $movements
+                ->where('type', 'out')
+                ->count(),
+
+            'total_in_quantity' => (float) $movements
+                ->where('type', 'in')
+                ->sum('quantity'),
+
+            'total_out_quantity' => (float) $movements
+                ->where('type', 'out')
+                ->sum('quantity'),
+        ];
+
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
+
         return response()->json([
             'success' => true,
+
             'message' => 'Laporan stok berhasil diambil',
 
             'data' => [
+                /*
+                |----------------------------------------------------------------------
+                | Filter Stok
+                |----------------------------------------------------------------------
+                */
+
                 'filters' => [
                     'status' => $status,
-                    'search' => $validated['search'] ?? null,
+
+                    'search' =>
+                        $validated['search'] ?? null,
                 ],
+
+                /*
+                |----------------------------------------------------------------------
+                | Summary Stok
+                |----------------------------------------------------------------------
+                */
 
                 'summary' => $summary,
 
+                /*
+                |----------------------------------------------------------------------
+                | Produk
+                |----------------------------------------------------------------------
+                */
+
                 'products' => $products->values(),
+
+                /*
+                |----------------------------------------------------------------------
+                | Filter Movement
+                |----------------------------------------------------------------------
+                */
+
+                'movement_filters' => [
+                    'start_date' => $movementStartDate,
+
+                    'end_date' => $movementEndDate,
+
+                    'type' => $movementType,
+
+                    'search' =>
+                        $validated['search'] ?? null,
+                ],
+
+                /*
+                |----------------------------------------------------------------------
+                | Summary Movement
+                |----------------------------------------------------------------------
+                */
+
+                'movement_summary' => $movementSummary,
+
+                /*
+                |----------------------------------------------------------------------
+                | Riwayat Movement
+                |----------------------------------------------------------------------
+                */
+
+                'movements' => $movements->values(),
             ],
         ]);
     }
