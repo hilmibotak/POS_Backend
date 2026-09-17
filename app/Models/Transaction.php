@@ -20,6 +20,8 @@ class Transaction extends Model
         'total',
         'paid',
         'change',
+        'payment_method',
+        'payment_status',
         'status',
         'transaction_date',
     ];

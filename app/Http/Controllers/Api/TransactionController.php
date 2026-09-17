@@ -29,7 +29,7 @@ class TransactionController extends Controller
             );
         }
 
-        // Search berdasarkan nomor transaksi
+        // Search nomor transaksi
         if ($request->filled('search')) {
             $search = $request->search;
 
@@ -40,11 +40,27 @@ class TransactionController extends Controller
             );
         }
 
-        // Filter status
+        // Filter status transaksi
         if ($request->filled('status')) {
             $query->where(
                 'status',
                 $request->status
+            );
+        }
+
+        // Filter status pembayaran
+        if ($request->filled('payment_status')) {
+            $query->where(
+                'payment_status',
+                $request->payment_status
+            );
+        }
+
+        // Filter metode pembayaran
+        if ($request->filled('payment_method')) {
+            $query->where(
+                'payment_method',
+                $request->payment_method
             );
         }
 
@@ -108,6 +124,11 @@ class TransactionController extends Controller
             'paid' =>
                 'required|numeric|min:0',
 
+            'payment_method' => [
+                'required',
+                'in:cash,qris,transfer,debit,credit,bon',
+            ],
+
             'items' =>
                 'required|array|min:1',
 
@@ -121,12 +142,22 @@ class TransactionController extends Controller
                 'required|numeric|min:0.001',
         ]);
 
-        $transaction = DB::transaction(
-            function () use ($validated) {
+        $paymentMethod = $validated['payment_method'];
 
+        $transaction = DB::transaction(
+            function () use (
+                $validated,
+                $paymentMethod
+            ) {
                 $subtotal = 0;
 
                 $items = [];
+
+                /*
+                =====================================================
+                1. CEK PRODUK, SATUAN, HARGA DAN STOK
+                =====================================================
+                */
 
                 foreach ($validated['items'] as $item) {
 
@@ -151,8 +182,7 @@ class TransactionController extends Controller
 
                     /*
                     Jika satuan yang dipilih adalah
-                    satuan dasar produk, gunakan harga
-                    dari products.
+                    satuan dasar produk.
                     */
                     if (!$productUnit) {
 
@@ -182,26 +212,15 @@ class TransactionController extends Controller
                     }
 
                     /*
-                    Jumlah yang akan mengurangi stok.
+                    Jumlah dalam satuan dasar.
                     */
                     $baseQuantity =
                         $item['quantity'] *
                         $conversionRate;
 
-                    if (
-                        $product->stock <
-                        $baseQuantity
-                    ) {
-                        abort(
-                            422,
-                            'Stok ' .
-                            $product->name .
-                            ' tidak mencukupi. ' .
-                            'Stok tersedia: ' .
-                            $product->stock
-                        );
-                    }
-
+                    /*
+                    Subtotal item.
+                    */
                     $itemSubtotal =
                         $item['quantity'] *
                         $unitPrice;
@@ -223,6 +242,12 @@ class TransactionController extends Controller
                     ];
                 }
 
+                /*
+                =====================================================
+                2. HITUNG TOTAL
+                =====================================================
+                */
+
                 $discount =
                     $validated['discount'] ?? 0;
 
@@ -231,9 +256,23 @@ class TransactionController extends Controller
                     0
                 );
 
+                /*
+                =====================================================
+                3. VALIDASI PEMBAYARAN
+                =====================================================
+
+                Cash/debit/credit harus membayar penuh.
+
+                QRIS/transfer boleh masuk pending.
+                Bon juga tidak harus dibayar sekarang.
+                */
+
                 if (
-                    $validated['paid'] <
-                    $total
+                    in_array(
+                        $paymentMethod,
+                        ['cash', 'debit', 'credit']
+                    ) &&
+                    $validated['paid'] < $total
                 ) {
                     abort(
                         422,
@@ -241,9 +280,54 @@ class TransactionController extends Controller
                     );
                 }
 
-                $change =
-                    $validated['paid'] -
-                    $total;
+                /*
+                Untuk QRIS/transfer/bon,
+                paid boleh 0 karena belum diterima.
+                */
+
+                $paid = $validated['paid'];
+
+                /*
+                =====================================================
+                4. HITUNG STATUS PEMBAYARAN
+                =====================================================
+                */
+
+                if (
+                    in_array(
+                        $paymentMethod,
+                        ['qris', 'transfer', 'bon']
+                    )
+                ) {
+                    $paymentStatus = 'pending';
+                } else {
+                    $paymentStatus = 'completed';
+                }
+
+                /*
+                =====================================================
+                5. STATUS TRANSAKSI
+                =====================================================
+                */
+
+                $transactionStatus = 'completed';
+
+                /*
+                =====================================================
+                6. HITUNG KEMBALIAN
+                =====================================================
+                */
+
+                $change = max(
+                    $paid - $total,
+                    0
+                );
+
+                /*
+                =====================================================
+                7. BUAT TRANSAKSI
+                =====================================================
+                */
 
                 $transaction =
                     Transaction::create([
@@ -267,17 +351,29 @@ class TransactionController extends Controller
                             $total,
 
                         'paid' =>
-                            $validated['paid'],
+                            $paid,
 
                         'change' =>
                             $change,
 
+                        'payment_method' =>
+                            $paymentMethod,
+
+                        'payment_status' =>
+                            $paymentStatus,
+
                         'status' =>
-                            'completed',
+                            $transactionStatus,
 
                         'transaction_date' =>
                             now(),
                     ]);
+
+                /*
+                =====================================================
+                8. SIMPAN DETAIL TRANSAKSI
+                =====================================================
+                */
 
                 foreach ($items as $item) {
 
@@ -303,41 +399,89 @@ class TransactionController extends Controller
                         'subtotal' =>
                             $item['subtotal'],
                     ]);
+                }
 
-                    /*
-                    Kurangi stok produk.
-                    */
-                    $item['product']->decrement(
-                        'stock',
-                        $item['base_quantity']
+                /*
+                =====================================================
+                9. KURANGI STOK
+                =====================================================
+
+                Cash/debit/credit:
+                    langsung kurangi stok.
+
+                Bon:
+                    barang dibawa sekarang,
+                    jadi stok langsung berkurang.
+
+                QRIS/transfer:
+                    belum kurangi stok karena pembayaran
+                    masih menunggu konfirmasi admin.
+                */
+
+                $shouldDecreaseStock =
+                    in_array(
+                        $paymentMethod,
+                        [
+                            'cash',
+                            'debit',
+                            'credit',
+                            'bon',
+                        ]
                     );
 
-                    /*
-                    Catat riwayat stok.
-                    */
-                    StockMovement::create([
-                        'product_id' =>
-                            $item['product']->id,
+                if ($shouldDecreaseStock) {
 
-                        'user_id' =>
-                            auth()->id() ?? 1,
+                    foreach ($items as $item) {
 
-                        'type' =>
-                            'out',
+                        if (
+                            $item['product']->stock <
+                            $item['base_quantity']
+                        ) {
+                            abort(
+                                422,
+                                'Stok ' .
+                                $item['product']->name .
+                                ' tidak mencukupi. ' .
+                                'Stok tersedia: ' .
+                                $item['product']->stock
+                            );
+                        }
 
-                        'quantity' =>
-                            $item['base_quantity'],
+                        /*
+                        Kurangi stok.
+                        */
+                        $item['product']->decrement(
+                            'stock',
+                            $item['base_quantity']
+                        );
 
-                        'reference_type' =>
-                            'transaction',
+                        /*
+                        Catat pergerakan stok.
+                        */
+                        StockMovement::create([
+                            'product_id' =>
+                                $item['product']->id,
 
-                        'reference_id' =>
-                            $transaction->id,
+                            'user_id' =>
+                                auth()->id() ?? 1,
 
-                        'note' =>
-                            'Penjualan ' .
-                            $transaction->transaction_number,
-                    ]);
+                            'type' =>
+                                'out',
+
+                            'quantity' =>
+                                $item['base_quantity'],
+
+                            'reference_type' =>
+                                'transaction',
+
+                            'reference_id' =>
+                                $transaction->id,
+
+                            'note' =>
+                                'Penjualan ' .
+                                $transaction->transaction_number,
+                        ]);
+                    }
                 }
 
                 return $transaction;
@@ -354,9 +498,148 @@ class TransactionController extends Controller
         return response()->json([
             'success' => true,
             'message' =>
-                'Transaksi berhasil dibuat',
+                $transaction->payment_status === 'pending'
+                    ? 'Transaksi berhasil dibuat dan menunggu konfirmasi pembayaran.'
+                    : 'Transaksi berhasil dibuat',
+
             'data' => $transaction,
         ], 201);
+    }
+
+    /*
+    =========================================================
+    KONFIRMASI PEMBAYARAN
+    =========================================================
+
+    Digunakan Admin untuk QRIS / Transfer.
+
+    Setelah dikonfirmasi:
+    - payment_status = completed
+    - stok dikurangi
+    - stock movement dibuat
+    */
+
+    public function confirmPayment(Transaction $transaction)
+    {
+        if (
+            !in_array(
+                $transaction->payment_method,
+                ['qris', 'transfer']
+            )
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' =>
+                    'Transaksi ini tidak memerlukan konfirmasi pembayaran.',
+            ], 422);
+        }
+
+        if (
+            $transaction->payment_status ===
+            'completed'
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' =>
+                    'Pembayaran transaksi ini sudah dikonfirmasi.',
+            ], 422);
+        }
+
+        DB::transaction(function () use ($transaction) {
+
+            $transaction = Transaction::lockForUpdate()
+                ->findOrFail($transaction->id);
+
+            $transaction->load([
+                'details.product',
+            ]);
+
+            foreach ($transaction->details as $detail) {
+
+                $product = Product::lockForUpdate()
+                    ->findOrFail(
+                        $detail->product_id
+                    );
+
+                if (
+                    $product->stock <
+                    $detail->base_quantity
+                ) {
+                    abort(
+                        422,
+                        'Stok ' .
+                        $product->name .
+                        ' tidak mencukupi saat pembayaran dikonfirmasi. ' .
+                        'Stok tersedia: ' .
+                        $product->stock
+                    );
+                }
+
+                /*
+                Kurangi stok setelah pembayaran
+                benar-benar dikonfirmasi.
+                */
+                $product->decrement(
+                    'stock',
+                    $detail->base_quantity
+                );
+
+                /*
+                Catat stok keluar.
+                */
+                StockMovement::create([
+                    'product_id' =>
+                        $product->id,
+
+                    'user_id' =>
+                        auth()->id(),
+
+                    'type' =>
+                        'out',
+
+                    'quantity' =>
+                        $detail->base_quantity,
+
+                    'reference_type' =>
+                        'transaction',
+
+                    'reference_id' =>
+                        $transaction->id,
+
+                    'note' =>
+                        'Pembayaran dikonfirmasi - ' .
+                        $transaction->transaction_number,
+                ]);
+            }
+
+            /*
+            Tandai pembayaran selesai.
+            */
+            $transaction->update([
+                'payment_status' =>
+                    'completed',
+
+                'paid' =>
+                    $transaction->total,
+
+                'change' =>
+                    0,
+            ]);
+        });
+
+        $transaction->load([
+            'customer',
+            'user',
+            'details.product',
+            'details.unit',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' =>
+                'Pembayaran berhasil dikonfirmasi dan stok telah dikurangi.',
+            'data' => $transaction,
+        ]);
     }
 
     private function generateTransactionNumber()
@@ -422,6 +705,12 @@ class TransactionController extends Controller
 
                     'status' =>
                         $transaction->status,
+
+                    'payment_method' =>
+                        $transaction->payment_method,
+
+                    'payment_status' =>
+                        $transaction->payment_status,
                 ],
 
                 'cashier' => [
@@ -453,11 +742,6 @@ class TransactionController extends Controller
 
                             return [
 
-                                /*
-                                Sekarang product bukan lagi
-                                string saja, tetapi object
-                                lengkap dengan brand dan size.
-                                */
                                 'product' => [
                                     'id' =>
                                         $detail->product->id,

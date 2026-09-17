@@ -145,6 +145,11 @@ Route::middleware([
         'stock'
     ]);
 
+    Route::post(
+        '/transactions/{transaction}/confirm-payment',
+        [TransactionController::class, 'confirmPayment']
+    );
+
 });
 
 
