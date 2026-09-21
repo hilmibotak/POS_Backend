@@ -4,8 +4,6 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Transaction extends Model
 {
@@ -22,6 +20,7 @@ class Transaction extends Model
         'change',
         'payment_method',
         'payment_status',
+        'remaining_amount',
         'status',
         'transaction_date',
     ];
@@ -32,21 +31,24 @@ class Transaction extends Model
         'total' => 'decimal:2',
         'paid' => 'decimal:2',
         'change' => 'decimal:2',
+        'remaining_amount' => 'decimal:2',
         'transaction_date' => 'datetime',
     ];
 
-    public function customer(): BelongsTo
+    public function customer()
     {
         return $this->belongsTo(Customer::class);
     }
 
-    public function user(): BelongsTo
+    public function user()
     {
         return $this->belongsTo(User::class);
     }
 
-    public function details(): HasMany
+    public function details()
     {
-        return $this->hasMany(TransactionDetail::class);
+        return $this->hasMany(
+            TransactionDetail::class
+        );
     }
 }
