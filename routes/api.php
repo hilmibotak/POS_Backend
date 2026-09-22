@@ -21,6 +21,7 @@ use App\Http\Controllers\Api\ReportController;
 Route::post('/login', [AuthController::class, 'login']);
 
 Route::middleware('auth:sanctum')->group(function () {
+
     Route::get('/me', [AuthController::class, 'me']);
 
     Route::put('/profile', [
@@ -93,12 +94,27 @@ Route::middleware([
 
 
     // =================================================
-    // PRODUCT UNITS
+    // PRODUCT UNITS - ADMIN CRUD
     // =================================================
 
-    Route::apiResource(
-        'products.product-units',
-        ProductUnitController::class
+    Route::post(
+        '/products/{product}/product-units',
+        [ProductUnitController::class, 'store']
+    );
+
+    Route::put(
+        '/products/{product}/product-units/{productUnit}',
+        [ProductUnitController::class, 'update']
+    );
+
+    Route::patch(
+        '/products/{product}/product-units/{productUnit}',
+        [ProductUnitController::class, 'update']
+    );
+
+    Route::delete(
+        '/products/{product}/product-units/{productUnit}',
+        [ProductUnitController::class, 'destroy']
     );
 
 
@@ -131,9 +147,17 @@ Route::middleware([
     // EMPLOYEES / PEGAWAI
     // =================================================
 
-    Route::apiResource('employees', UserController::class)->parameters([
+    Route::apiResource(
+        'employees',
+        UserController::class
+    )->parameters([
         'employees' => 'user'
     ]);
+
+
+    // =================================================
+    // REPORTS
+    // =================================================
 
     Route::get('/reports/sales', [
         ReportController::class,
@@ -144,6 +168,11 @@ Route::middleware([
         ReportController::class,
         'stock'
     ]);
+
+
+    // =================================================
+    // CONFIRM PAYMENT
+    // =================================================
 
     Route::post(
         '/transactions/{transaction}/confirm-payment',
@@ -174,6 +203,22 @@ Route::middleware([
     Route::get(
         '/products/{product}',
         [ProductController::class, 'show']
+    );
+
+
+    // =================================================
+    // PRODUCT UNITS - READ
+    // Admin dan Kasir dapat melihat unit produk
+    // =================================================
+
+    Route::get(
+        '/products/{product}/product-units',
+        [ProductUnitController::class, 'index']
+    );
+
+    Route::get(
+        '/products/{product}/product-units/{productUnit}',
+        [ProductUnitController::class, 'show']
     );
 
 
@@ -213,5 +258,15 @@ Route::middleware([
             'reprint'
         ]
     );
+
+
+    // =================================================
+    // PAYMENT HISTORIES
+    // =================================================
+
+    Route::get('/payment-histories', [
+        TransactionController::class,
+        'paymentHistory'
+    ]);
 
 });
