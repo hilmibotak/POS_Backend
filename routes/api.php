@@ -246,6 +246,14 @@ Route::middleware([
         'show'
     ]);
 
+    // =================================================
+    // PAYMENT / BAYAR UTANG
+    // =================================================
+
+    Route::post(
+        '/transactions/{transaction}/payments',
+        [TransactionController::class, 'payDebt']
+    );
 
     // =================================================
     // REPRINT TRANSACTION

@@ -18,8 +18,7 @@ class CustomerController extends Controller
                     ->orWhere('phone', 'like', "%{$search}%");
             })
             ->latest()
-            ->paginate(10)
-            ->withQueryString();
+            ->paginate(10);
 
         return response()->json([
             'success' => true,

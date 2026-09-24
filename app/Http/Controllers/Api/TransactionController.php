@@ -11,11 +11,16 @@ use App\Models\Transaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
-
 class TransactionController extends Controller
 {
     /**
-     * Menampilkan daftar transaksi.
+     * Menampilkan daftar transaksi pembayaran langsung.
+     *
+     * Hanya transaksi dengan metode:
+     * - cash
+     * - transfer
+     * - qris
+     * - debit
      */
     public function index(Request $request)
     {
@@ -24,28 +29,74 @@ class TransactionController extends Controller
             'user',
             'details.product',
             'details.unit',
-        ]);
+        ])
+            ->whereIn('payment_method', [
+                'cash',
+                'transfer',
+                'qris',
+                'debit',
+            ]);
 
-        // Kasir hanya bisa melihat transaksi miliknya sendiri
+        /*
+        |--------------------------------------------------------------------------
+        | Kasir hanya bisa melihat transaksi miliknya sendiri
+        |--------------------------------------------------------------------------
+        */
+
         if (auth()->user()->role === 'kasir') {
-            $query->where('user_id', auth()->id());
-        }
-
-        // Search nomor transaksi
-        if ($request->filled('search')) {
             $query->where(
-                'transaction_number',
-                'like',
-                '%' . $request->search . '%'
+                'user_id',
+                auth()->id()
             );
         }
 
-        // Filter status transaksi
-        if ($request->filled('status')) {
-            $query->where('status', $request->status);
+        /*
+        |--------------------------------------------------------------------------
+        | Search nomor transaksi
+        |--------------------------------------------------------------------------
+        */
+
+        if ($request->filled('search')) {
+            $search = trim($request->search);
+
+            $query->where(function ($q) use ($search) {
+                $q->where(
+                    'transaction_number',
+                    'like',
+                    '%' . $search . '%'
+                )
+                ->orWhereHas('customer', function ($customerQuery) use ($search) {
+                    $customerQuery
+                        ->where('name', 'like', '%' . $search . '%')
+                        ->orWhere('phone', 'like', '%' . $search . '%');
+                })
+                ->orWhereHas('user', function ($userQuery) use ($search) {
+                    $userQuery
+                        ->where('name', 'like', '%' . $search . '%')
+                        ->orWhere('email', 'like', '%' . $search . '%');
+                });
+            });
         }
 
-        // Filter status pembayaran
+        /*
+        |--------------------------------------------------------------------------
+        | Filter status transaksi
+        |--------------------------------------------------------------------------
+        */
+
+        if ($request->filled('status')) {
+            $query->where(
+                'status',
+                $request->status
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Filter status pembayaran
+        |--------------------------------------------------------------------------
+        */
+
         if ($request->filled('payment_status')) {
             $query->where(
                 'payment_status',
@@ -53,7 +104,12 @@ class TransactionController extends Controller
             );
         }
 
-        // Filter metode pembayaran
+        /*
+        |--------------------------------------------------------------------------
+        | Filter metode pembayaran
+        |--------------------------------------------------------------------------
+        */
+
         if ($request->filled('payment_method')) {
             $query->where(
                 'payment_method',
@@ -61,7 +117,12 @@ class TransactionController extends Controller
             );
         }
 
-        // Filter tanggal
+        /*
+        |--------------------------------------------------------------------------
+        | Filter tanggal
+        |--------------------------------------------------------------------------
+        */
+
         if ($request->filled('date')) {
             $query->whereDate(
                 'transaction_date',
@@ -69,13 +130,19 @@ class TransactionController extends Controller
             );
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Pagination
+        |--------------------------------------------------------------------------
+        */
+
         $transactions = $query
             ->latest('transaction_date')
             ->paginate(10);
 
         return response()->json([
             'success' => true,
-            'message' => 'Riwayat transaksi berhasil diambil',
+            'message' => 'Daftar transaksi berhasil diambil',
             'data' => $transactions,
         ]);
     }
@@ -85,7 +152,12 @@ class TransactionController extends Controller
      */
     public function show(Transaction $transaction)
     {
-        // Kasir hanya bisa melihat transaksi miliknya
+        /*
+        |--------------------------------------------------------------------------
+        | Kasir hanya bisa melihat transaksi miliknya
+        |--------------------------------------------------------------------------
+        */
+
         if (
             auth()->user()->role === 'kasir' &&
             $transaction->user_id !== auth()->id()
@@ -96,6 +168,12 @@ class TransactionController extends Controller
                     'Kamu tidak memiliki izin untuk melihat transaksi ini.',
             ], 403);
         }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Load data lengkap
+        |--------------------------------------------------------------------------
+        */
 
         $transaction->load([
             'customer',
@@ -165,7 +243,12 @@ class TransactionController extends Controller
 
         $paymentMethod = $validated['payment_method'];
 
-        // BON dan CREDIT harus memiliki customer
+        /*
+        |--------------------------------------------------------------------------
+        | BON dan CREDIT harus memiliki customer
+        |--------------------------------------------------------------------------
+        */
+
         if (
             in_array($paymentMethod, ['bon', 'credit']) &&
             empty($validated['customer_id'])
@@ -177,7 +260,12 @@ class TransactionController extends Controller
             ], 422);
         }
 
-        // PARTIAL juga harus memiliki customer
+        /*
+        |--------------------------------------------------------------------------
+        | PARTIAL harus memiliki customer
+        |--------------------------------------------------------------------------
+        */
+
         if (
             $paymentMethod === 'partial' &&
             empty($validated['customer_id'])
@@ -218,12 +306,13 @@ class TransactionController extends Controller
                         (int) $item['unit_id'] ===
                         (int) $product->base_unit_id
                     ) {
-                        // Jika menggunakan satuan dasar
+                        // Menggunakan satuan dasar
                         $conversionRate = 1;
 
-                        $unitPrice = (float) $product->selling_price;
+                        $unitPrice =
+                            (float) $product->selling_price;
                     } else {
-                        // Jika menggunakan satuan alternatif
+                        // Menggunakan satuan alternatif
                         $productUnit = ProductUnit::where(
                             'product_id',
                             $product->id
@@ -293,14 +382,29 @@ class TransactionController extends Controller
                     $subtotal += $itemSubtotal;
 
                     $transactionItems[] = [
-                        'product' => $product,
-                        'product_id' => $product->id,
-                        'unit_id' => $item['unit_id'],
-                        'quantity' => $quantity,
-                        'conversion_rate' => $conversionRate,
-                        'base_quantity' => $baseQuantity,
-                        'unit_price' => $unitPrice,
-                        'subtotal' => $itemSubtotal,
+                        'product' =>
+                            $product,
+
+                        'product_id' =>
+                            $product->id,
+
+                        'unit_id' =>
+                            $item['unit_id'],
+
+                        'quantity' =>
+                            $quantity,
+
+                        'conversion_rate' =>
+                            $conversionRate,
+
+                        'base_quantity' =>
+                            $baseQuantity,
+
+                        'unit_price' =>
+                            $unitPrice,
+
+                        'subtotal' =>
+                            $itemSubtotal,
                     ];
                 }
 
@@ -338,7 +442,12 @@ class TransactionController extends Controller
                     $paid = 0;
                 }
 
-                // PARTIAL = harus bayar sebagian
+                /*
+                |--------------------------------------------------------------------------
+                | PARTIAL
+                |--------------------------------------------------------------------------
+                */
+
                 if ($paymentMethod === 'partial') {
                     if ($paid <= 0) {
                         abort(
@@ -355,7 +464,12 @@ class TransactionController extends Controller
                     }
                 }
 
-                // Cash dan debit harus lunas
+                /*
+                |--------------------------------------------------------------------------
+                | CASH dan DEBIT harus lunas
+                |--------------------------------------------------------------------------
+                */
+
                 if (
                     in_array(
                         $paymentMethod,
@@ -369,7 +483,12 @@ class TransactionController extends Controller
                     );
                 }
 
-                // QRIS dan transfer menunggu konfirmasi admin
+                /*
+                |--------------------------------------------------------------------------
+                | QRIS dan TRANSFER menunggu konfirmasi Admin
+                |--------------------------------------------------------------------------
+                */
+
                 if (
                     in_array(
                         $paymentMethod,
@@ -392,7 +511,9 @@ class TransactionController extends Controller
                     )
                 ) {
                     $paymentStatus = 'unpaid';
-                } elseif ($paymentMethod === 'partial') {
+                } elseif (
+                    $paymentMethod === 'partial'
+                ) {
                     $paymentStatus = 'partial';
                 } elseif (
                     in_array(
@@ -516,8 +637,6 @@ class TransactionController extends Controller
                 |--------------------------------------------------------------------------
                 |
                 | Hanya jika memang ada uang yang dibayarkan.
-                | BON / CREDIT = 0
-                | QRIS / TRANSFER = 0 sampai dikonfirmasi admin.
                 |
                 */
 
@@ -559,7 +678,7 @@ class TransactionController extends Controller
                 | langsung mengurangi stok.
                 |
                 | QRIS / Transfer masih pending sehingga stok
-                | belum dikurangi sampai admin melakukan konfirmasi.
+                | belum dikurangi sampai Admin melakukan konfirmasi.
                 |
                 */
 
@@ -684,11 +803,14 @@ class TransactionController extends Controller
     /**
      * Konfirmasi pembayaran QRIS / Transfer oleh Admin.
      */
-    /**
- * Konfirmasi pembayaran QRIS / Transfer oleh Admin.
- */
-public function confirmPayment(Transaction $transaction)
+    public function confirmPayment(Transaction $transaction)
     {
+        /*
+        |--------------------------------------------------------------------------
+        | Pastikan metode pembayaran memang QRIS / Transfer
+        |--------------------------------------------------------------------------
+        */
+
         if (
             !in_array(
                 $transaction->payment_method,
@@ -701,6 +823,12 @@ public function confirmPayment(Transaction $transaction)
                     'Transaksi ini tidak membutuhkan konfirmasi pembayaran.',
             ], 422);
         }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Cek apakah sudah dikonfirmasi
+        |--------------------------------------------------------------------------
+        */
 
         if (
             $transaction->payment_status === 'completed'
@@ -754,11 +882,6 @@ public function confirmPayment(Transaction $transaction)
                 |--------------------------------------------------------------------------
                 | Lock semua produk dan cek stok
                 |--------------------------------------------------------------------------
-                |
-                | Semua stok dicek terlebih dahulu.
-                | Kalau ada satu saja yang tidak cukup,
-                | tidak ada stok yang dikurangi.
-                |
                 */
 
                 $products = [];
@@ -791,13 +914,13 @@ public function confirmPayment(Transaction $transaction)
                 /*
                 |--------------------------------------------------------------------------
                 | Semua stok cukup
-                | Sekarang baru kurangi stok
                 |--------------------------------------------------------------------------
                 */
 
                 foreach ($transaction->details as $detail) {
 
-                    $product = $products[$detail->product_id];
+                    $product =
+                        $products[$detail->product_id];
 
                     $product->decrement(
                         'stock',
@@ -968,8 +1091,7 @@ public function confirmPayment(Transaction $transaction)
         */
 
         if (
-            $transaction->payment_status ===
-            'completed'
+            $transaction->payment_status === 'completed'
         ) {
             return response()->json([
                 'success' => false,
@@ -1143,29 +1265,74 @@ public function confirmPayment(Transaction $transaction)
     }
 
     /**
-     * Menampilkan semua riwayat pembayaran.
+     * Menampilkan daftar transaksi yang memiliki tagihan / pembayaran.
+     *
+     * Hanya transaksi dengan metode:
+     * - bon
+     * - credit
+     * - partial
+     *
+     * Satu transaksi hanya muncul satu kali.
      */
     public function paymentHistory(Request $request)
     {
-        $query = PaymentHistory::with([
-            'transaction.customer',
-            'transaction.user',
+        $query = Transaction::with([
+            'customer',
             'user',
-        ]);
+            'paymentHistories.user',
+        ])
+            ->whereIn('payment_method', [
+                'bon',
+                'credit',
+                'partial',
+            ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Kasir hanya bisa melihat transaksi miliknya sendiri
+        |--------------------------------------------------------------------------
+        */
 
         if (auth()->user()->role === 'kasir') {
-            $query->whereHas('transaction', function ($q) {
-                $q->where('user_id', auth()->id());
-            });
+            $query->where(
+                'user_id',
+                auth()->id()
+            );
         }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Search nomor transaksi
+        |--------------------------------------------------------------------------
+        */
 
         if ($request->filled('search')) {
-            $search = $request->search;
+        $search = trim($request->search);
 
-            $query->whereHas('transaction', function ($q) use ($search) {
-                $q->where('transaction_number', 'like', "%{$search}%");
+        $query->where(function ($q) use ($search) {
+            $q->where(
+                'transaction_number',
+                'like',
+                '%' . $search . '%'
+            )
+            ->orWhereHas('customer', function ($customerQuery) use ($search) {
+                $customerQuery
+                    ->where('name', 'like', '%' . $search . '%')
+                    ->orWhere('phone', 'like', '%' . $search . '%');
+            })
+            ->orWhereHas('user', function ($userQuery) use ($search) {
+                $userQuery
+                    ->where('name', 'like', '%' . $search . '%')
+                    ->orWhere('email', 'like', '%' . $search . '%');
             });
-        }
+        });
+    }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Filter metode pembayaran awal
+        |--------------------------------------------------------------------------
+        */
 
         if ($request->filled('payment_method')) {
             $query->where(
@@ -1174,21 +1341,46 @@ public function confirmPayment(Transaction $transaction)
             );
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Filter status pembayaran
+        |--------------------------------------------------------------------------
+        */
+
+        if ($request->filled('payment_status')) {
+            $query->where(
+                'payment_status',
+                $request->payment_status
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Filter tanggal transaksi
+        |--------------------------------------------------------------------------
+        */
+
         if ($request->filled('date')) {
             $query->whereDate(
-                'payment_date',
+                'transaction_date',
                 $request->date
             );
         }
 
-        $histories = $query
-            ->latest('payment_date')
+        /*
+        |--------------------------------------------------------------------------
+        | Pagination
+        |--------------------------------------------------------------------------
+        */
+
+        $transactions = $query
+            ->latest('transaction_date')
             ->paginate(10);
 
         return response()->json([
             'success' => true,
             'message' => 'Riwayat pembayaran berhasil diambil',
-            'data' => $histories,
+            'data' => $transactions,
         ]);
     }
 
@@ -1216,8 +1408,7 @@ public function confirmPayment(Transaction $transaction)
         } else {
             $lastNumber =
                 (int) substr(
-                    $lastTransaction
-                        ->transaction_number,
+                    $lastTransaction->transaction_number,
                     -4
                 );
 
