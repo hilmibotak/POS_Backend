@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\PaymentHistory;
 use App\Models\Product;
 use App\Models\ProductUnit;
+use App\Models\Setting;
 use App\Models\StockMovement;
 use App\Models\Transaction;
 use Illuminate\Http\Request;
@@ -14,13 +15,7 @@ use Illuminate\Support\Facades\DB;
 class TransactionController extends Controller
 {
     /**
-     * Menampilkan daftar transaksi pembayaran langsung.
-     *
-     * Hanya transaksi dengan metode:
-     * - cash
-     * - transfer
-     * - qris
-     * - debit
+     * Menampilkan daftar transaksi.
      */
     public function index(Request $request)
     {
@@ -29,53 +24,27 @@ class TransactionController extends Controller
             'user',
             'details.product',
             'details.unit',
-        ])
-            ->whereIn('payment_method', [
-                'cash',
-                'transfer',
-                'qris',
-                'debit',
-            ]);
+        ]);
 
         /*
         |--------------------------------------------------------------------------
         | Kasir hanya bisa melihat transaksi miliknya sendiri
         |--------------------------------------------------------------------------
         */
-
         if (auth()->user()->role === 'kasir') {
-            $query->where(
-                'user_id',
-                auth()->id()
-            );
+            $query->where('user_id', auth()->id());
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Search nomor transaksi
+        | Search
         |--------------------------------------------------------------------------
         */
-
         if ($request->filled('search')) {
-            $search = trim($request->search);
-
-            $query->where(function ($q) use ($search) {
-                $q->where(
-                    'transaction_number',
-                    'like',
-                    '%' . $search . '%'
-                )
-                ->orWhereHas('customer', function ($customerQuery) use ($search) {
-                    $customerQuery
-                        ->where('name', 'like', '%' . $search . '%')
-                        ->orWhere('phone', 'like', '%' . $search . '%');
-                })
-                ->orWhereHas('user', function ($userQuery) use ($search) {
-                    $userQuery
-                        ->where('name', 'like', '%' . $search . '%')
-                        ->orWhere('email', 'like', '%' . $search . '%');
-                });
-            });
+            $this->applySearch(
+                $query,
+                $request->search
+            );
         }
 
         /*
@@ -83,7 +52,6 @@ class TransactionController extends Controller
         | Filter status transaksi
         |--------------------------------------------------------------------------
         */
-
         if ($request->filled('status')) {
             $query->where(
                 'status',
@@ -96,7 +64,6 @@ class TransactionController extends Controller
         | Filter status pembayaran
         |--------------------------------------------------------------------------
         */
-
         if ($request->filled('payment_status')) {
             $query->where(
                 'payment_status',
@@ -109,7 +76,6 @@ class TransactionController extends Controller
         | Filter metode pembayaran
         |--------------------------------------------------------------------------
         */
-
         if ($request->filled('payment_method')) {
             $query->where(
                 'payment_method',
@@ -122,7 +88,6 @@ class TransactionController extends Controller
         | Filter tanggal
         |--------------------------------------------------------------------------
         */
-
         if ($request->filled('date')) {
             $query->whereDate(
                 'transaction_date',
@@ -130,21 +95,74 @@ class TransactionController extends Controller
             );
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Pagination
-        |--------------------------------------------------------------------------
-        */
-
         $transactions = $query
             ->latest('transaction_date')
-            ->paginate(10);
+            ->paginate(10)
+            ->withQueryString();
 
         return response()->json([
             'success' => true,
-            'message' => 'Daftar transaksi berhasil diambil',
+            'message' => 'Riwayat transaksi berhasil diambil',
             'data' => $transactions,
         ]);
+    }
+
+    /**
+     * Search transaksi berdasarkan:
+     * - nomor transaksi
+     * - nama customer
+     * - nomor HP customer
+     * - nama kasir
+     * - email kasir
+     */
+    private function applySearch($query, $search)
+    {
+        $search = trim($search);
+
+        $query->where(function ($q) use ($search) {
+
+            $q->where(
+                'transaction_number',
+                'like',
+                '%' . $search . '%'
+            )
+
+            ->orWhereHas(
+                'customer',
+                function ($customerQuery) use ($search) {
+                    $customerQuery
+                        ->where(
+                            'name',
+                            'like',
+                            '%' . $search . '%'
+                        )
+                        ->orWhere(
+                            'phone',
+                            'like',
+                            '%' . $search . '%'
+                        );
+                }
+            )
+
+            ->orWhereHas(
+                'user',
+                function ($userQuery) use ($search) {
+                    $userQuery
+                        ->where(
+                            'name',
+                            'like',
+                            '%' . $search . '%'
+                        )
+                        ->orWhere(
+                            'email',
+                            'like',
+                            '%' . $search . '%'
+                        );
+                }
+            );
+        });
+
+        return $query;
     }
 
     /**
@@ -157,7 +175,6 @@ class TransactionController extends Controller
         | Kasir hanya bisa melihat transaksi miliknya
         |--------------------------------------------------------------------------
         */
-
         if (
             auth()->user()->role === 'kasir' &&
             $transaction->user_id !== auth()->id()
@@ -168,12 +185,6 @@ class TransactionController extends Controller
                     'Kamu tidak memiliki izin untuk melihat transaksi ini.',
             ], 403);
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Load data lengkap
-        |--------------------------------------------------------------------------
-        */
 
         $transaction->load([
             'customer',
@@ -245,12 +256,14 @@ class TransactionController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | BON dan CREDIT harus memiliki customer
+        | BON / CREDIT wajib customer
         |--------------------------------------------------------------------------
         */
-
         if (
-            in_array($paymentMethod, ['bon', 'credit']) &&
+            in_array(
+                $paymentMethod,
+                ['bon', 'credit']
+            ) &&
             empty($validated['customer_id'])
         ) {
             return response()->json([
@@ -262,10 +275,9 @@ class TransactionController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | PARTIAL harus memiliki customer
+        | PARTIAL wajib customer
         |--------------------------------------------------------------------------
         */
-
         if (
             $paymentMethod === 'partial' &&
             empty($validated['customer_id'])
@@ -278,474 +290,517 @@ class TransactionController extends Controller
         }
 
         try {
-            $transaction = DB::transaction(function () use (
-                $validated,
-                $paymentMethod
-            ) {
-                $subtotal = 0;
 
-                $transactionItems = [];
+            $transaction = DB::transaction(
+                function () use (
+                    $validated,
+                    $paymentMethod
+                ) {
 
-                /*
-                |--------------------------------------------------------------------------
-                | Hitung setiap item
-                |--------------------------------------------------------------------------
-                */
+                    $subtotal = 0;
 
-                foreach ($validated['items'] as $item) {
-                    $product = Product::lockForUpdate()
-                        ->findOrFail($item['product_id']);
+                    $transactionItems = [];
 
                     /*
                     |--------------------------------------------------------------------------
-                    | Tentukan conversion rate dan harga
+                    | Hitung setiap item
                     |--------------------------------------------------------------------------
                     */
-
-                    if (
-                        (int) $item['unit_id'] ===
-                        (int) $product->base_unit_id
+                    foreach (
+                        $validated['items']
+                        as $item
                     ) {
-                        // Menggunakan satuan dasar
-                        $conversionRate = 1;
 
-                        $unitPrice =
-                            (float) $product->selling_price;
-                    } else {
-                        // Menggunakan satuan alternatif
-                        $productUnit = ProductUnit::where(
-                            'product_id',
-                            $product->id
-                        )
-                            ->where(
-                                'unit_id',
-                                $item['unit_id']
-                            )
-                            ->where(
-                                'is_active',
-                                true
-                            )
-                            ->first();
-
-                        if (!$productUnit) {
-                            abort(
-                                422,
-                                'Satuan yang dipilih belum dikonfigurasi untuk produk "' .
-                                $product->name .
-                                '".'
-                            );
-                        }
-
-                        $conversionRate =
-                            (float) $productUnit->conversion_rate;
-
-                        $unitPrice =
-                            (float) $productUnit->selling_price;
-                    }
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Hitung stok dalam base unit
-                    |--------------------------------------------------------------------------
-                    */
-
-                    $quantity =
-                        (float) $item['quantity'];
-
-                    $baseQuantity =
-                        $quantity * $conversionRate;
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Cek stok
-                    |--------------------------------------------------------------------------
-                    */
-
-                    if ($product->stock < $baseQuantity) {
-                        abort(
-                            422,
-                            'Stok produk "' .
-                            $product->name .
-                            '" tidak mencukupi.'
-                        );
-                    }
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Hitung subtotal item
-                    |--------------------------------------------------------------------------
-                    */
-
-                    $itemSubtotal =
-                        $quantity * $unitPrice;
-
-                    $subtotal += $itemSubtotal;
-
-                    $transactionItems[] = [
-                        'product' =>
-                            $product,
-
-                        'product_id' =>
-                            $product->id,
-
-                        'unit_id' =>
-                            $item['unit_id'],
-
-                        'quantity' =>
-                            $quantity,
-
-                        'conversion_rate' =>
-                            $conversionRate,
-
-                        'base_quantity' =>
-                            $baseQuantity,
-
-                        'unit_price' =>
-                            $unitPrice,
-
-                        'subtotal' =>
-                            $itemSubtotal,
-                    ];
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Hitung total
-                |--------------------------------------------------------------------------
-                */
-
-                $discount =
-                    (float) ($validated['discount'] ?? 0);
-
-                $total =
-                    max(
-                        $subtotal - $discount,
-                        0
-                    );
-
-                $paid =
-                    (float) $validated['paid'];
-
-                /*
-                |--------------------------------------------------------------------------
-                | Aturan pembayaran
-                |--------------------------------------------------------------------------
-                */
-
-                // BON dan CREDIT = bayar nanti
-                if (
-                    in_array(
-                        $paymentMethod,
-                        ['bon', 'credit']
-                    )
-                ) {
-                    $paid = 0;
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | PARTIAL
-                |--------------------------------------------------------------------------
-                */
-
-                if ($paymentMethod === 'partial') {
-                    if ($paid <= 0) {
-                        abort(
-                            422,
-                            'Pembayaran partial harus lebih dari 0.'
-                        );
-                    }
-
-                    if ($paid >= $total) {
-                        abort(
-                            422,
-                            'Pembayaran partial harus kurang dari total transaksi.'
-                        );
-                    }
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | CASH dan DEBIT harus lunas
-                |--------------------------------------------------------------------------
-                */
-
-                if (
-                    in_array(
-                        $paymentMethod,
-                        ['cash', 'debit']
-                    ) &&
-                    $paid < $total
-                ) {
-                    abort(
-                        422,
-                        'Uang pembayaran kurang.'
-                    );
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | QRIS dan TRANSFER menunggu konfirmasi Admin
-                |--------------------------------------------------------------------------
-                */
-
-                if (
-                    in_array(
-                        $paymentMethod,
-                        ['qris', 'transfer']
-                    )
-                ) {
-                    $paid = 0;
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Tentukan status pembayaran
-                |--------------------------------------------------------------------------
-                */
-
-                if (
-                    in_array(
-                        $paymentMethod,
-                        ['bon', 'credit']
-                    )
-                ) {
-                    $paymentStatus = 'unpaid';
-                } elseif (
-                    $paymentMethod === 'partial'
-                ) {
-                    $paymentStatus = 'partial';
-                } elseif (
-                    in_array(
-                        $paymentMethod,
-                        ['qris', 'transfer']
-                    )
-                ) {
-                    $paymentStatus = 'pending';
-                } else {
-                    $paymentStatus = 'completed';
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Hitung kembalian dan sisa tagihan
-                |--------------------------------------------------------------------------
-                */
-
-                $change =
-                    max(
-                        $paid - $total,
-                        0
-                    );
-
-                $remainingAmount =
-                    max(
-                        $total - $paid,
-                        0
-                    );
-
-                /*
-                |--------------------------------------------------------------------------
-                | Buat nomor transaksi
-                |--------------------------------------------------------------------------
-                */
-
-                $transactionNumber =
-                    $this->generateTransactionNumber();
-
-                /*
-                |--------------------------------------------------------------------------
-                | Buat transaksi
-                |--------------------------------------------------------------------------
-                */
-
-                $transaction = Transaction::create([
-                    'transaction_number' =>
-                        $transactionNumber,
-
-                    'customer_id' =>
-                        $validated['customer_id'] ?? null,
-
-                    'user_id' =>
-                        auth()->id(),
-
-                    'subtotal' =>
-                        $subtotal,
-
-                    'discount' =>
-                        $discount,
-
-                    'total' =>
-                        $total,
-
-                    'paid' =>
-                        $paid,
-
-                    'change' =>
-                        $change,
-
-                    'remaining_amount' =>
-                        $remainingAmount,
-
-                    'payment_method' =>
-                        $paymentMethod,
-
-                    'payment_status' =>
-                        $paymentStatus,
-
-                    'status' =>
-                        'completed',
-
-                    'transaction_date' =>
-                        now(),
-                ]);
-
-                /*
-                |--------------------------------------------------------------------------
-                | Simpan detail transaksi
-                |--------------------------------------------------------------------------
-                */
-
-                foreach ($transactionItems as $item) {
-                    $transaction->details()->create([
-                        'product_id' =>
-                            $item['product_id'],
-
-                        'unit_id' =>
-                            $item['unit_id'],
-
-                        'quantity' =>
-                            $item['quantity'],
-
-                        'conversion_rate' =>
-                            $item['conversion_rate'],
-
-                        'base_quantity' =>
-                            $item['base_quantity'],
-
-                        'unit_price' =>
-                            $item['unit_price'],
-
-                        'subtotal' =>
-                            $item['subtotal'],
-                    ]);
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Simpan pembayaran awal ke payment_histories
-                |--------------------------------------------------------------------------
-                |
-                | Hanya jika memang ada uang yang dibayarkan.
-                |
-                */
-
-                if ($paid > 0) {
-                    PaymentHistory::create([
-                        'transaction_id' =>
-                            $transaction->id,
-
-                        'user_id' =>
-                            auth()->id(),
-
-                        'payment_method' =>
-                            $paymentMethod,
-
-                        'amount' =>
-                            $paid,
-
-                        'payment_date' =>
-                            now(),
-
-                        'note' =>
-                            $paymentMethod === 'partial'
-                                ? 'Pembayaran awal transaksi'
-                                : 'Pembayaran transaksi',
-                    ]);
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Kurangi stok
-                |--------------------------------------------------------------------------
-                |
-                | Cash
-                | Debit
-                | BON
-                | CREDIT
-                | Partial
-                |
-                | langsung mengurangi stok.
-                |
-                | QRIS / Transfer masih pending sehingga stok
-                | belum dikurangi sampai Admin melakukan konfirmasi.
-                |
-                */
-
-                if (
-                    in_array(
-                        $paymentMethod,
-                        [
-                            'cash',
-                            'debit',
-                            'credit',
-                            'bon',
-                            'partial',
-                        ]
-                    )
-                ) {
-                    foreach ($transactionItems as $item) {
                         $product =
-                            $item['product'];
-
-                        $product->decrement(
-                            'stock',
-                            $item['base_quantity']
-                        );
+                            Product::lockForUpdate()
+                                ->findOrFail(
+                                    $item['product_id']
+                                );
 
                         /*
                         |--------------------------------------------------------------------------
-                        | Catat stock movement
+                        | Tentukan conversion rate dan harga
                         |--------------------------------------------------------------------------
                         */
 
-                        StockMovement::create([
+                        if (
+                            (int) $item['unit_id'] ===
+                            (int) $product->base_unit_id
+                        ) {
+
+                            $conversionRate = 1;
+
+                            $unitPrice =
+                                (float) $product->selling_price;
+
+                        } else {
+
+                            $productUnit =
+                                ProductUnit::where(
+                                    'product_id',
+                                    $product->id
+                                )
+                                    ->where(
+                                        'unit_id',
+                                        $item['unit_id']
+                                    )
+                                    ->where(
+                                        'is_active',
+                                        true
+                                    )
+                                    ->first();
+
+                            if (!$productUnit) {
+
+                                abort(
+                                    422,
+                                    'Satuan yang dipilih belum dikonfigurasi untuk produk "' .
+                                    $product->name .
+                                    '".'
+                                );
+                            }
+
+                            $conversionRate =
+                                (float) $productUnit
+                                    ->conversion_rate;
+
+                            $unitPrice =
+                                (float) $productUnit
+                                    ->selling_price;
+                        }
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Quantity
+                        |--------------------------------------------------------------------------
+                        */
+
+                        $quantity =
+                            (float) $item['quantity'];
+
+                        $baseQuantity =
+                            $quantity *
+                            $conversionRate;
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Cek stok
+                        |--------------------------------------------------------------------------
+                        */
+
+                        if (
+                            $product->stock <
+                            $baseQuantity
+                        ) {
+
+                            abort(
+                                422,
+                                'Stok produk "' .
+                                $product->name .
+                                '" tidak mencukupi.'
+                            );
+                        }
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Subtotal
+                        |--------------------------------------------------------------------------
+                        */
+
+                        $itemSubtotal =
+                            $quantity *
+                            $unitPrice;
+
+                        $subtotal +=
+                            $itemSubtotal;
+
+                        $transactionItems[] = [
+                            'product' =>
+                                $product,
+
                             'product_id' =>
                                 $product->id,
-
-                            'user_id' =>
-                                auth()->id(),
-
-                            'type' =>
-                                'out',
-
-                            'quantity' =>
-                                $item['quantity'],
 
                             'unit_id' =>
                                 $item['unit_id'],
 
+                            'quantity' =>
+                                $quantity,
+
                             'conversion_rate' =>
-                                $item['conversion_rate'],
+                                $conversionRate,
 
                             'base_quantity' =>
-                                $item['base_quantity'],
+                                $baseQuantity,
 
-                            'reference_type' =>
-                                'transaction',
+                            'unit_price' =>
+                                $unitPrice,
 
-                            'reference_id' =>
+                            'subtotal' =>
+                                $itemSubtotal,
+                        ];
+                    }
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Total
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $discount =
+                        (float) (
+                            $validated['discount']
+                            ?? 0
+                        );
+
+                    $total =
+                        max(
+                            $subtotal -
+                            $discount,
+                            0
+                        );
+
+                    $paid =
+                        (float) $validated['paid'];
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | BON / CREDIT
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        in_array(
+                            $paymentMethod,
+                            ['bon', 'credit']
+                        )
+                    ) {
+                        $paid = 0;
+                    }
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | PARTIAL
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        $paymentMethod === 'partial'
+                    ) {
+
+                        if ($paid <= 0) {
+
+                            abort(
+                                422,
+                                'Pembayaran partial harus lebih dari 0.'
+                            );
+                        }
+
+                        if ($paid >= $total) {
+
+                            abort(
+                                422,
+                                'Pembayaran partial harus kurang dari total transaksi.'
+                            );
+                        }
+                    }
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | CASH / DEBIT
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        in_array(
+                            $paymentMethod,
+                            ['cash', 'debit']
+                        ) &&
+                        $paid < $total
+                    ) {
+
+                        abort(
+                            422,
+                            'Uang pembayaran kurang.'
+                        );
+                    }
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | QRIS / TRANSFER
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        in_array(
+                            $paymentMethod,
+                            ['qris', 'transfer']
+                        )
+                    ) {
+                        $paid = 0;
+                    }
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Payment status
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        in_array(
+                            $paymentMethod,
+                            ['bon', 'credit']
+                        )
+                    ) {
+
+                        $paymentStatus =
+                            'unpaid';
+
+                    } elseif (
+                        $paymentMethod ===
+                        'partial'
+                    ) {
+
+                        $paymentStatus =
+                            'partial';
+
+                    } elseif (
+                        in_array(
+                            $paymentMethod,
+                            ['qris', 'transfer']
+                        )
+                    ) {
+
+                        $paymentStatus =
+                            'pending';
+
+                    } else {
+
+                        $paymentStatus =
+                            'completed';
+                    }
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Change
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $change =
+                        max(
+                            $paid - $total,
+                            0
+                        );
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Remaining
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $remainingAmount =
+                        max(
+                            $total - $paid,
+                            0
+                        );
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Nomor transaksi
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $transactionNumber =
+                        $this->generateTransactionNumber();
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Create transaction
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $transaction =
+                        Transaction::create([
+                            'transaction_number' =>
+                                $transactionNumber,
+
+                            'customer_id' =>
+                                $validated['customer_id']
+                                ?? null,
+
+                            'user_id' =>
+                                auth()->id(),
+
+                            'subtotal' =>
+                                $subtotal,
+
+                            'discount' =>
+                                $discount,
+
+                            'total' =>
+                                $total,
+
+                            'paid' =>
+                                $paid,
+
+                            'change' =>
+                                $change,
+
+                            'remaining_amount' =>
+                                $remainingAmount,
+
+                            'payment_method' =>
+                                $paymentMethod,
+
+                            'payment_status' =>
+                                $paymentStatus,
+
+                            'status' =>
+                                'completed',
+
+                            'transaction_date' =>
+                                now(),
+                        ]);
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Transaction details
+                    |--------------------------------------------------------------------------
+                    */
+
+                    foreach (
+                        $transactionItems
+                        as $item
+                    ) {
+
+                        $transaction
+                            ->details()
+                            ->create([
+                                'product_id' =>
+                                    $item['product_id'],
+
+                                'unit_id' =>
+                                    $item['unit_id'],
+
+                                'quantity' =>
+                                    $item['quantity'],
+
+                                'conversion_rate' =>
+                                    $item['conversion_rate'],
+
+                                'base_quantity' =>
+                                    $item['base_quantity'],
+
+                                'unit_price' =>
+                                    $item['unit_price'],
+
+                                'subtotal' =>
+                                    $item['subtotal'],
+                            ]);
+                    }
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Payment history awal
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if ($paid > 0) {
+
+                        PaymentHistory::create([
+                            'transaction_id' =>
                                 $transaction->id,
 
+                            'user_id' =>
+                                auth()->id(),
+
+                            'payment_method' =>
+                                $paymentMethod,
+
+                            'amount' =>
+                                $paid,
+
+                            'payment_date' =>
+                                now(),
+
                             'note' =>
-                                'Stok keluar dari transaksi ' .
-                                $transaction->transaction_number,
+                                $paymentMethod ===
+                                'partial'
+                                    ? 'Pembayaran awal transaksi'
+                                    : 'Pembayaran transaksi',
                         ]);
                     }
-                }
 
-                return $transaction;
-            });
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Kurangi stok
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        in_array(
+                            $paymentMethod,
+                            [
+                                'cash',
+                                'debit',
+                                'credit',
+                                'bon',
+                                'partial',
+                            ]
+                        )
+                    ) {
+
+                        foreach (
+                            $transactionItems
+                            as $item
+                        ) {
+
+                            $product =
+                                $item['product'];
+
+                            $product->decrement(
+                                'stock',
+                                $item['base_quantity']
+                            );
+
+                            StockMovement::create([
+                                'product_id' =>
+                                    $product->id,
+
+                                'user_id' =>
+                                    auth()->id(),
+
+                                'type' =>
+                                    'out',
+
+                                'quantity' =>
+                                    $item['quantity'],
+
+                                'unit_id' =>
+                                    $item['unit_id'],
+
+                                'conversion_rate' =>
+                                    $item['conversion_rate'],
+
+                                'base_quantity' =>
+                                    $item['base_quantity'],
+
+                                'reference_type' =>
+                                    'transaction',
+
+                                'reference_id' =>
+                                    $transaction->id,
+
+                                'note' =>
+                                    'Stok keluar dari transaksi ' .
+                                    $transaction->transaction_number,
+                            ]);
+                        }
+                    }
+
+                    return $transaction;
+                }
+            );
 
             /*
             |--------------------------------------------------------------------------
@@ -763,7 +818,7 @@ class TransactionController extends Controller
 
             /*
             |--------------------------------------------------------------------------
-            | Response message
+            | Message
             |--------------------------------------------------------------------------
             */
 
@@ -773,14 +828,20 @@ class TransactionController extends Controller
                     ['unpaid', 'partial']
                 )
             ) {
+
                 $message =
                     'Transaksi berhasil dibuat dan masuk ke tagihan.';
+
             } elseif (
-                $transaction->payment_status === 'pending'
+                $transaction->payment_status ===
+                'pending'
             ) {
+
                 $message =
                     'Transaksi berhasil dibuat dan menunggu konfirmasi pembayaran.';
+
             } else {
+
                 $message =
                     'Transaksi berhasil dibuat.';
             }
@@ -792,6 +853,7 @@ class TransactionController extends Controller
             ], 201);
 
         } catch (\Throwable $e) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -803,13 +865,9 @@ class TransactionController extends Controller
     /**
      * Konfirmasi pembayaran QRIS / Transfer oleh Admin.
      */
-    public function confirmPayment(Transaction $transaction)
-    {
-        /*
-        |--------------------------------------------------------------------------
-        | Pastikan metode pembayaran memang QRIS / Transfer
-        |--------------------------------------------------------------------------
-        */
+    public function confirmPayment(
+        Transaction $transaction
+    ) {
 
         if (
             !in_array(
@@ -817,6 +875,7 @@ class TransactionController extends Controller
                 ['qris', 'transfer']
             )
         ) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -824,15 +883,11 @@ class TransactionController extends Controller
             ], 422);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Cek apakah sudah dikonfirmasi
-        |--------------------------------------------------------------------------
-        */
-
         if (
-            $transaction->payment_status === 'completed'
+            $transaction->payment_status ===
+            'completed'
         ) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -841,180 +896,155 @@ class TransactionController extends Controller
         }
 
         try {
-            $transaction = DB::transaction(function () use ($transaction) {
 
-                /*
-                |--------------------------------------------------------------------------
-                | Lock transaksi
-                |--------------------------------------------------------------------------
-                */
-
-                $transaction = Transaction::lockForUpdate()
-                    ->findOrFail($transaction->id);
-
-                /*
-                |--------------------------------------------------------------------------
-                | Pastikan masih pending
-                |--------------------------------------------------------------------------
-                */
-
-                if (
-                    $transaction->payment_status !== 'pending'
-                ) {
-                    abort(
-                        422,
-                        'Transaksi ini sudah tidak berstatus pending.'
-                    );
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Load detail transaksi
-                |--------------------------------------------------------------------------
-                */
-
-                $transaction->load([
-                    'details.product',
-                    'details.unit',
-                ]);
-
-                /*
-                |--------------------------------------------------------------------------
-                | Lock semua produk dan cek stok
-                |--------------------------------------------------------------------------
-                */
-
-                $products = [];
-
-                foreach ($transaction->details as $detail) {
-
-                    $product = Product::lockForUpdate()
-                        ->findOrFail($detail->product_id);
-
-                    if (
-                        (float) $product->stock <
-                        (float) $detail->base_quantity
+            $transaction =
+                DB::transaction(
+                    function () use (
+                        $transaction
                     ) {
-                        abort(
-                            422,
-                            'Stok produk "' .
-                            $product->name .
-                            '" tidak mencukupi untuk konfirmasi transaksi. ' .
-                            'Stok tersedia: ' .
-                            $product->stock .
-                            ', kebutuhan: ' .
-                            $detail->base_quantity .
-                            '.'
-                        );
+
+                        $transaction =
+                            Transaction::lockForUpdate()
+                                ->findOrFail(
+                                    $transaction->id
+                                );
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Cek stok
+                        |--------------------------------------------------------------------------
+                        */
+
+                        foreach (
+                            $transaction->details
+                            as $detail
+                        ) {
+
+                            $product =
+                                Product::lockForUpdate()
+                                    ->findOrFail(
+                                        $detail->product_id
+                                    );
+
+                            if (
+                                $product->stock <
+                                $detail->base_quantity
+                            ) {
+
+                                abort(
+                                    422,
+                                    'Stok produk "' .
+                                    $product->name .
+                                    '" tidak mencukupi untuk konfirmasi transaksi.'
+                                );
+                            }
+                        }
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Kurangi stok
+                        |--------------------------------------------------------------------------
+                        */
+
+                        foreach (
+                            $transaction->details
+                            as $detail
+                        ) {
+
+                            $product =
+                                Product::lockForUpdate()
+                                    ->findOrFail(
+                                        $detail->product_id
+                                    );
+
+                            $product->decrement(
+                                'stock',
+                                $detail->base_quantity
+                            );
+
+                            StockMovement::create([
+                                'product_id' =>
+                                    $product->id,
+
+                                'user_id' =>
+                                    auth()->id(),
+
+                                'type' =>
+                                    'out',
+
+                                'quantity' =>
+                                    $detail->quantity,
+
+                                'unit_id' =>
+                                    $detail->unit_id,
+
+                                'conversion_rate' =>
+                                    $detail->conversion_rate,
+
+                                'base_quantity' =>
+                                    $detail->base_quantity,
+
+                                'reference_type' =>
+                                    'transaction',
+
+                                'reference_id' =>
+                                    $transaction->id,
+
+                                'note' =>
+                                    'Stok keluar setelah konfirmasi pembayaran transaksi ' .
+                                    $transaction->transaction_number,
+                            ]);
+                        }
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Update transaksi
+                        |--------------------------------------------------------------------------
+                        */
+
+                        $transaction->update([
+                            'paid' =>
+                                $transaction->total,
+
+                            'remaining_amount' =>
+                                0,
+
+                            'change' =>
+                                0,
+
+                            'payment_status' =>
+                                'completed',
+                        ]);
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Payment history
+                        |--------------------------------------------------------------------------
+                        */
+
+                        PaymentHistory::create([
+                            'transaction_id' =>
+                                $transaction->id,
+
+                            'user_id' =>
+                                auth()->id(),
+
+                            'payment_method' =>
+                                $transaction->payment_method,
+
+                            'amount' =>
+                                $transaction->total,
+
+                            'payment_date' =>
+                                now(),
+
+                            'note' =>
+                                'Pembayaran dikonfirmasi oleh admin',
+                        ]);
+
+                        return $transaction;
                     }
-
-                    $products[$product->id] = $product;
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Semua stok cukup
-                |--------------------------------------------------------------------------
-                */
-
-                foreach ($transaction->details as $detail) {
-
-                    $product =
-                        $products[$detail->product_id];
-
-                    $product->decrement(
-                        'stock',
-                        $detail->base_quantity
-                    );
-
-                    StockMovement::create([
-                        'product_id' =>
-                            $product->id,
-
-                        'user_id' =>
-                            auth()->id(),
-
-                        'type' =>
-                            'out',
-
-                        'quantity' =>
-                            $detail->quantity,
-
-                        'unit_id' =>
-                            $detail->unit_id,
-
-                        'conversion_rate' =>
-                            $detail->conversion_rate,
-
-                        'base_quantity' =>
-                            $detail->base_quantity,
-
-                        'reference_type' =>
-                            'transaction',
-
-                        'reference_id' =>
-                            $transaction->id,
-
-                        'note' =>
-                            'Stok keluar setelah konfirmasi pembayaran transaksi ' .
-                            $transaction->transaction_number,
-                    ]);
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Update pembayaran
-                |--------------------------------------------------------------------------
-                */
-
-                $transaction->update([
-                    'paid' =>
-                        $transaction->total,
-
-                    'remaining_amount' =>
-                        0,
-
-                    'change' =>
-                        0,
-
-                    'payment_status' =>
-                        'completed',
-                ]);
-
-                /*
-                |--------------------------------------------------------------------------
-                | Simpan payment history
-                |--------------------------------------------------------------------------
-                */
-
-                PaymentHistory::create([
-                    'transaction_id' =>
-                        $transaction->id,
-
-                    'user_id' =>
-                        auth()->id(),
-
-                    'payment_method' =>
-                        $transaction->payment_method,
-
-                    'amount' =>
-                        $transaction->total,
-
-                    'payment_date' =>
-                        now(),
-
-                    'note' =>
-                        'Pembayaran dikonfirmasi oleh admin',
-                ]);
-
-                return $transaction;
-            });
-
-            /*
-            |--------------------------------------------------------------------------
-            | Load data terbaru
-            |--------------------------------------------------------------------------
-            */
+                );
 
             $transaction->load([
                 'customer',
@@ -1027,9 +1057,8 @@ class TransactionController extends Controller
             return response()->json([
                 'success' => true,
                 'message' =>
-                    'Pembayaran berhasil dikonfirmasi dan stok telah dikurangi.',
-                'data' =>
-                    $transaction,
+                    'Pembayaran berhasil dikonfirmasi.',
+                'data' => $transaction,
             ]);
 
         } catch (\Throwable $e) {
@@ -1049,6 +1078,7 @@ class TransactionController extends Controller
         Request $request,
         Transaction $transaction
     ) {
+
         $validated = $request->validate([
             'amount' => [
                 'required',
@@ -1077,6 +1107,7 @@ class TransactionController extends Controller
             auth()->user()->role === 'kasir' &&
             $transaction->user_id !== auth()->id()
         ) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -1086,13 +1117,15 @@ class TransactionController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Cek status transaksi
+        | Cek status
         |--------------------------------------------------------------------------
         */
 
         if (
-            $transaction->payment_status === 'completed'
+            $transaction->payment_status ===
+            'completed'
         ) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -1103,6 +1136,7 @@ class TransactionController extends Controller
         if (
             $transaction->remaining_amount <= 0
         ) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -1111,118 +1145,122 @@ class TransactionController extends Controller
         }
 
         try {
-            $transaction = DB::transaction(
-                function () use (
-                    $validated,
-                    $transaction
-                ) {
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Lock transaksi
-                    |--------------------------------------------------------------------------
-                    */
 
-                    $transaction =
-                        Transaction::lockForUpdate()
-                            ->findOrFail(
-                                $transaction->id
+            $transaction =
+                DB::transaction(
+                    function () use (
+                        $validated,
+                        $transaction
+                    ) {
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Lock transaksi
+                        |--------------------------------------------------------------------------
+                        */
+
+                        $transaction =
+                            Transaction::lockForUpdate()
+                                ->findOrFail(
+                                    $transaction->id
+                                );
+
+                        $remaining =
+                            (float)
+                            $transaction
+                                ->remaining_amount;
+
+                        $amount =
+                            (float)
+                            $validated['amount'];
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Tidak boleh lebih
+                        |--------------------------------------------------------------------------
+                        */
+
+                        if (
+                            $amount >
+                            $remaining
+                        ) {
+
+                            abort(
+                                422,
+                                'Nominal pembayaran melebihi sisa tagihan.'
                             );
+                        }
 
-                    $remaining =
-                        (float) $transaction
-                            ->remaining_amount;
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Hitung pembayaran
+                        |--------------------------------------------------------------------------
+                        */
 
-                    $amount =
-                        (float) $validated['amount'];
+                        $newPaid =
+                            (float)
+                            $transaction->paid +
+                            $amount;
 
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Jangan boleh membayar lebih dari sisa tagihan
-                    |--------------------------------------------------------------------------
-                    */
+                        $newRemaining =
+                            $remaining -
+                            $amount;
 
-                    if ($amount > $remaining) {
-                        abort(
-                            422,
-                            'Nominal pembayaran melebihi sisa tagihan.'
-                        );
+                        $newStatus =
+                            $newRemaining <= 0
+                                ? 'completed'
+                                : 'partial';
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Payment history
+                        |--------------------------------------------------------------------------
+                        */
+
+                        PaymentHistory::create([
+                            'transaction_id' =>
+                                $transaction->id,
+
+                            'user_id' =>
+                                auth()->id(),
+
+                            'payment_method' =>
+                                $validated['payment_method'],
+
+                            'amount' =>
+                                $amount,
+
+                            'payment_date' =>
+                                now(),
+
+                            'note' =>
+                                $validated['note'] ??
+                                'Pembayaran tagihan',
+                        ]);
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Update transaksi
+                        |--------------------------------------------------------------------------
+                        */
+
+                        $transaction->update([
+                            'paid' =>
+                                $newPaid,
+
+                            'remaining_amount' =>
+                                $newRemaining,
+
+                            'payment_status' =>
+                                $newStatus,
+
+                            'change' =>
+                                0,
+                        ]);
+
+                        return $transaction;
                     }
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Hitung pembayaran baru
-                    |--------------------------------------------------------------------------
-                    */
-
-                    $newPaid =
-                        (float) $transaction->paid +
-                        $amount;
-
-                    $newRemaining =
-                        $remaining -
-                        $amount;
-
-                    $newStatus =
-                        $newRemaining <= 0
-                            ? 'completed'
-                            : 'partial';
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Simpan payment history
-                    |--------------------------------------------------------------------------
-                    */
-
-                    PaymentHistory::create([
-                        'transaction_id' =>
-                            $transaction->id,
-
-                        'user_id' =>
-                            auth()->id(),
-
-                        'payment_method' =>
-                            $validated['payment_method'],
-
-                        'amount' =>
-                            $amount,
-
-                        'payment_date' =>
-                            now(),
-
-                        'note' =>
-                            $validated['note'] ??
-                            'Pembayaran tagihan',
-                    ]);
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Update transaksi
-                    |--------------------------------------------------------------------------
-                    */
-
-                    $transaction->update([
-                        'paid' =>
-                            $newPaid,
-
-                        'remaining_amount' =>
-                            $newRemaining,
-
-                        'payment_status' =>
-                            $newStatus,
-
-                        'change' =>
-                            0,
-                    ]);
-
-                    return $transaction;
-                }
-            );
-
-            /*
-            |--------------------------------------------------------------------------
-            | Load data terbaru
-            |--------------------------------------------------------------------------
-            */
+                );
 
             $transaction->load([
                 'customer',
@@ -1234,7 +1272,7 @@ class TransactionController extends Controller
 
             /*
             |--------------------------------------------------------------------------
-            | Response
+            | Message
             |--------------------------------------------------------------------------
             */
 
@@ -1242,9 +1280,12 @@ class TransactionController extends Controller
                 $transaction->payment_status ===
                 'completed'
             ) {
+
                 $message =
                     'Pembayaran berhasil dan transaksi sudah lunas.';
+
             } else {
+
                 $message =
                     'Pembayaran berhasil dicatat.';
             }
@@ -1256,6 +1297,7 @@ class TransactionController extends Controller
             ]);
 
         } catch (\Throwable $e) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -1265,76 +1307,78 @@ class TransactionController extends Controller
     }
 
     /**
-     * Menampilkan daftar transaksi yang memiliki tagihan / pembayaran.
-     *
-     * Hanya transaksi dengan metode:
-     * - bon
-     * - credit
-     * - partial
-     *
-     * Satu transaksi hanya muncul satu kali.
+     * Menampilkan semua riwayat pembayaran.
      */
-    public function paymentHistory(Request $request)
-    {
-        $query = Transaction::with([
-            'customer',
+    public function paymentHistory(
+        Request $request
+    ) {
+
+        $query = PaymentHistory::with([
+            'transaction.customer',
+            'transaction.user',
             'user',
-            'paymentHistories.user',
-        ])
-            ->whereIn('payment_method', [
-                'bon',
-                'credit',
-                'partial',
-            ]);
+        ]);
 
         /*
         |--------------------------------------------------------------------------
-        | Kasir hanya bisa melihat transaksi miliknya sendiri
+        | Kasir hanya melihat pembayaran dari transaksi miliknya
         |--------------------------------------------------------------------------
         */
 
-        if (auth()->user()->role === 'kasir') {
-            $query->where(
-                'user_id',
-                auth()->id()
+        if (
+            auth()->user()->role ===
+            'kasir'
+        ) {
+
+            $query->whereHas(
+                'transaction',
+                function ($q) {
+                    $q->where(
+                        'user_id',
+                        auth()->id()
+                    );
+                }
             );
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Search nomor transaksi
+        | Search
         |--------------------------------------------------------------------------
         */
 
-        if ($request->filled('search')) {
-        $search = trim($request->search);
+        if (
+            $request->filled('search')
+        ) {
 
-        $query->where(function ($q) use ($search) {
-            $q->where(
-                'transaction_number',
-                'like',
-                '%' . $search . '%'
-            )
-            ->orWhereHas('customer', function ($customerQuery) use ($search) {
-                $customerQuery
-                    ->where('name', 'like', '%' . $search . '%')
-                    ->orWhere('phone', 'like', '%' . $search . '%');
-            })
-            ->orWhereHas('user', function ($userQuery) use ($search) {
-                $userQuery
-                    ->where('name', 'like', '%' . $search . '%')
-                    ->orWhere('email', 'like', '%' . $search . '%');
-            });
-        });
-    }
+            $search =
+                $request->search;
+
+            $query->whereHas(
+                'transaction',
+                function ($q) use ($search) {
+
+                    $q->where(
+                        'transaction_number',
+                        'like',
+                        '%' . $search . '%'
+                    );
+                }
+            );
+        }
 
         /*
         |--------------------------------------------------------------------------
-        | Filter metode pembayaran awal
+        | Filter metode
         |--------------------------------------------------------------------------
         */
 
-        if ($request->filled('payment_method')) {
+        if (
+            $request->filled(
+                'payment_method'
+            )
+        ) {
+
             $query->where(
                 'payment_method',
                 $request->payment_method
@@ -1343,44 +1387,72 @@ class TransactionController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Filter status pembayaran
+        | Filter tanggal
         |--------------------------------------------------------------------------
         */
 
-        if ($request->filled('payment_status')) {
-            $query->where(
-                'payment_status',
-                $request->payment_status
-            );
-        }
+        if (
+            $request->filled('date')
+        ) {
 
-        /*
-        |--------------------------------------------------------------------------
-        | Filter tanggal transaksi
-        |--------------------------------------------------------------------------
-        */
-
-        if ($request->filled('date')) {
             $query->whereDate(
-                'transaction_date',
+                'payment_date',
                 $request->date
             );
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Pagination
-        |--------------------------------------------------------------------------
-        */
-
-        $transactions = $query
-            ->latest('transaction_date')
-            ->paginate(10);
+        $payments =
+            $query
+                ->latest('payment_date')
+                ->paginate(10);
 
         return response()->json([
             'success' => true,
-            'message' => 'Riwayat pembayaran berhasil diambil',
-            'data' => $transactions,
+            'message' =>
+                'Riwayat pembayaran berhasil diambil',
+            'data' => $payments,
+        ]);
+    }
+
+    /**
+     * Menampilkan detail riwayat pembayaran
+     * berdasarkan transaksi.
+     */
+    public function paymentHistoryDetail(
+        Transaction $transaction
+    ) {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Kasir hanya bisa melihat transaksi miliknya
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            auth()->user()->role === 'kasir' &&
+            $transaction->user_id !== auth()->id()
+        ) {
+
+            return response()->json([
+                'success' => false,
+                'message' =>
+                    'Kamu tidak memiliki izin untuk melihat transaksi ini.',
+            ], 403);
+        }
+
+        $transaction->load([
+            'customer',
+            'user',
+            'details.product',
+            'details.unit',
+            'paymentHistories.user',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' =>
+                'Detail riwayat pembayaran berhasil diambil',
+            'data' => $transaction,
         ]);
     }
 
@@ -1404,11 +1476,15 @@ class TransactionController extends Controller
                 ->first();
 
         if (!$lastTransaction) {
+
             $number = 1;
+
         } else {
+
             $lastNumber =
                 (int) substr(
-                    $lastTransaction->transaction_number,
+                    $lastTransaction
+                        ->transaction_number,
                     -4
                 );
 
@@ -1427,9 +1503,13 @@ class TransactionController extends Controller
 
     /**
      * Cetak / reprint transaksi.
+     *
+     * Data toko sekarang diambil dari tabel settings.
      */
-    public function reprint(Transaction $transaction)
-    {
+    public function reprint(
+        Transaction $transaction
+    ) {
+
         /*
         |--------------------------------------------------------------------------
         | Kasir hanya bisa reprint transaksi miliknya
@@ -1440,6 +1520,7 @@ class TransactionController extends Controller
             auth()->user()->role === 'kasir' &&
             $transaction->user_id !== auth()->id()
         ) {
+
             return response()->json([
                 'success' => false,
                 'message' =>
@@ -1449,7 +1530,7 @@ class TransactionController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Load data transaksi
+        | Load transaksi lengkap
         |--------------------------------------------------------------------------
         */
 
@@ -1463,23 +1544,53 @@ class TransactionController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Format data untuk struk
+        | Ambil pengaturan toko
+        |--------------------------------------------------------------------------
+        */
+
+        $setting = Setting::first();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Data struk
         |--------------------------------------------------------------------------
         */
 
         $data = [
+
+            /*
+            |--------------------------------------------------------------------------
+            | STORE
+            |--------------------------------------------------------------------------
+            */
+
             'store' => [
+
                 'name' =>
+                    $setting?->store_name ??
                     'BuildPOS',
 
                 'address' =>
-                    'Toko Material Bangunan',
+                    $setting?->address ??
+                    '-',
 
                 'phone' =>
+                    $setting?->phone ??
                     '-',
+
+                'receipt_footer' =>
+                    $setting?->receipt_footer ??
+                    'Terima kasih telah berbelanja.',
             ],
 
+            /*
+            |--------------------------------------------------------------------------
+            | TRANSACTION
+            |--------------------------------------------------------------------------
+            */
+
             'transaction' => [
+
                 'id' =>
                     $transaction->id,
 
@@ -1499,7 +1610,14 @@ class TransactionController extends Controller
                     $transaction->payment_status,
             ],
 
+            /*
+            |--------------------------------------------------------------------------
+            | CASHIER
+            |--------------------------------------------------------------------------
+            */
+
             'cashier' => [
+
                 'id' =>
                     $transaction->user?->id,
 
@@ -1507,7 +1625,14 @@ class TransactionController extends Controller
                     $transaction->user?->name,
             ],
 
+            /*
+            |--------------------------------------------------------------------------
+            | CUSTOMER
+            |--------------------------------------------------------------------------
+            */
+
             'customer' => [
+
                 'id' =>
                     $transaction->customer?->id,
 
@@ -1518,11 +1643,20 @@ class TransactionController extends Controller
                     $transaction->customer?->phone,
             ],
 
+            /*
+            |--------------------------------------------------------------------------
+            | ITEMS
+            |--------------------------------------------------------------------------
+            */
+
             'items' =>
-                $transaction->details
+                $transaction
+                    ->details
                     ->map(
                         function ($detail) {
+
                             return [
+
                                 'product_id' =>
                                     $detail->product_id,
 
@@ -1535,6 +1669,12 @@ class TransactionController extends Controller
                                 'quantity' =>
                                     $detail->quantity,
 
+                                'conversion_rate' =>
+                                    $detail->conversion_rate,
+
+                                'base_quantity' =>
+                                    $detail->base_quantity,
+
                                 'unit_price' =>
                                     $detail->unit_price,
 
@@ -1545,7 +1685,14 @@ class TransactionController extends Controller
                     )
                     ->values(),
 
+            /*
+            |--------------------------------------------------------------------------
+            | SUMMARY
+            |--------------------------------------------------------------------------
+            */
+
             'summary' => [
+
                 'subtotal' =>
                     $transaction->subtotal,
 
@@ -1565,12 +1712,20 @@ class TransactionController extends Controller
                     $transaction->remaining_amount,
             ],
 
+            /*
+            |--------------------------------------------------------------------------
+            | PAYMENT HISTORIES
+            |--------------------------------------------------------------------------
+            */
+
             'payment_histories' =>
                 $transaction
                     ->paymentHistories
                     ->map(
                         function ($payment) {
+
                             return [
+
                                 'id' =>
                                     $payment->id,
 
@@ -1593,6 +1748,12 @@ class TransactionController extends Controller
                     )
                     ->values(),
         ];
+
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
 
         return response()->json([
             'success' => true,

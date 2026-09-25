@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\TransactionController;
 use App\Http\Controllers\Api\StockMovementController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\ReportController;
+use App\Http\Controllers\Api\SettingController;
 
 
 // =====================================================
@@ -153,6 +154,17 @@ Route::middleware([
     )->parameters([
         'employees' => 'user'
     ]);
+
+    Route::middleware([
+        'auth:sanctum',
+        'role:admin'
+    ])->group(function () {
+
+        // route admin yang sudah ada...
+
+        Route::get('/settings', [SettingController::class, 'show']);
+        Route::put('/settings', [SettingController::class, 'update']);
+    });
 
 
     // =================================================
